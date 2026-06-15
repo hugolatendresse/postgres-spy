@@ -90,6 +90,19 @@ CONFIGURE_FLAGS="--without-icu" ./rebuild-postgres.sh --reconfigure
 
 ## Initialize And Start A Local Server
 
+PostgreSQL is a client/server database. That differs from DuckDB's embedded workflow:
+
+```sh
+build/release/duckdb -f query.sql
+```
+
+With PostgreSQL, the `postgres` server process owns the database files. The `psql` command is a client that connects to that running server and sends SQL to it. So the flow is:
+
+1. Initialize a data directory with `initdb`.
+2. Start the server with `pg_ctl`.
+3. Create a database with `createdb`.
+4. Run SQL files with `psql -f`.
+
 Create a data directory once:
 
 ```sh
@@ -116,6 +129,24 @@ Stop the server:
 ```
 
 Because this install is under the repository, you do not need to set `LD_LIBRARY_PATH` on Linux for this default build. Adding `.local/pgsql/bin` to `PATH` is enough for day-to-day use.
+
+The rebuild script can run those steps for you:
+
+```sh
+./rebuild-postgres.sh --initdb --start --createdb
+```
+
+On a brand-new EC2 instance after cloning the repo, this builds PostgreSQL, initializes the data directory, starts the local server, creates the `bench` database, and runs the benchmark SQL file:
+
+```sh
+./rebuild-postgres.sh --install-deps --initdb --start --createdb --run-sql bench_hash_join.sql
+```
+
+After changing PostgreSQL source code, a typical rebuild-and-rerun loop is:
+
+```sh
+./rebuild-postgres.sh --stop --start --run-sql bench_hash_join.sql
+```
 
 ## Quick Timing Setup
 
@@ -163,6 +194,12 @@ For wall-clock measurements outside `psql`, use the installed `psql` with `/usr/
 
 ```sh
 /usr/bin/time -p .local/pgsql/bin/psql bench -c 'SELECT count(*) FROM scan_dummy;'
+```
+
+Run the checked-in hash join benchmark file:
+
+```sh
+.local/pgsql/bin/psql bench -f bench_hash_join.sql
 ```
 
 For repeatable comparisons, keep the server settings, data size, warm/cold cache state, and EC2 instance type fixed between runs.
