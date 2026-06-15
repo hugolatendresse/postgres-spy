@@ -80,6 +80,18 @@ static bool ExecParallelHashTuplePrealloc(HashJoinTable hashtable,
 										  size_t size);
 static void ExecParallelHashMergeCounters(HashJoinTable hashtable);
 static void ExecParallelHashCloseBatchAccessors(HashJoinTable hashtable);
+static inline void ExecHashJoinTimerAccum(instr_time *elapsed,
+										  instr_time start);
+
+
+static inline void
+ExecHashJoinTimerAccum(instr_time *elapsed, instr_time start)
+{
+	instr_time	stop;
+
+	INSTR_TIME_SET_CURRENT(stop);
+	INSTR_TIME_ACCUM_DIFF(*elapsed, stop, start);
+}
 
 
 /* ----------------------------------------------------------------
@@ -143,6 +155,15 @@ MultiExecPrivateHash(HashState *node)
 	TupleTableSlot *slot;
 	ExprContext *econtext;
 	double		nullTuples = 0;
+	instr_time	total_start;
+	instr_time	total_time;
+	instr_time	insert_time;
+	instr_time	resize_time;
+	instr_time	timer_start;
+
+	INSTR_TIME_SET_CURRENT(total_start);
+	INSTR_TIME_SET_ZERO(insert_time);
+	INSTR_TIME_SET_ZERO(resize_time);
 
 	/*
 	 * get state info from node
@@ -188,13 +209,17 @@ MultiExecPrivateHash(HashState *node)
 			if (bucketNumber != INVALID_SKEW_BUCKET_NO)
 			{
 				/* It's a skew tuple, so put it into that hash table */
+				INSTR_TIME_SET_CURRENT(timer_start);
 				ExecHashSkewTableInsert(hashtable, slot, hashvalue,
 										bucketNumber);
+				ExecHashJoinTimerAccum(&insert_time, timer_start);
 			}
 			else
 			{
 				/* Not subject to skew optimization, so insert normally */
+				INSTR_TIME_SET_CURRENT(timer_start);
 				ExecHashTableInsert(hashtable, slot, hashvalue);
+				ExecHashJoinTimerAccum(&insert_time, timer_start);
 			}
 			hashtable->totalTuples += 1;
 		}
@@ -210,6 +235,7 @@ MultiExecPrivateHash(HashState *node)
 	}
 
 	/* resize the hash table if needed (NTUP_PER_BUCKET exceeded) */
+	INSTR_TIME_SET_CURRENT(timer_start);
 	if (hashtable->nbuckets != hashtable->nbuckets_optimal)
 		ExecHashIncreaseNumBuckets(hashtable);
 
@@ -217,9 +243,22 @@ MultiExecPrivateHash(HashState *node)
 	hashtable->spaceUsed += hashtable->nbuckets * sizeof(HashJoinTuple);
 	if (hashtable->spaceUsed > hashtable->spacePeak)
 		hashtable->spacePeak = hashtable->spaceUsed;
+	ExecHashJoinTimerAccum(&resize_time, timer_start);
 
 	/* Report total number of tuples output (but not those discarded) */
 	hashtable->reportTuples = hashtable->totalTuples + nullTuples;
+
+	INSTR_TIME_SET_CURRENT(total_time);
+	INSTR_TIME_SUBTRACT(total_time, total_start);
+
+	ereport(NOTICE,
+			(errmsg("hash join build timing: total %.3f ms, hash table insert %.3f ms, resize/finalize %.3f ms, rows %.0f, batches %d, buckets %d",
+					INSTR_TIME_GET_MILLISEC(total_time),
+					INSTR_TIME_GET_MILLISEC(insert_time),
+					INSTR_TIME_GET_MILLISEC(resize_time),
+					hashtable->totalTuples,
+					hashtable->nbatch,
+					hashtable->nbuckets)));
 }
 
 /* ----------------------------------------------------------------
